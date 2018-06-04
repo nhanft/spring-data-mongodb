@@ -148,6 +148,7 @@ import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
 import com.mongodb.reactivestreams.client.Success;
 import com.mongodb.util.JSONParseException;
+import reactor.util.function.Tuples;
 
 /**
  * Primary implementation of {@link ReactiveMongoOperations}. It simplifies the use of Reactive MongoDB usage and helps
@@ -1232,17 +1233,18 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 
 		return Mono.defer(() -> {
 
-			initializeVersionProperty(objectToSave);
-			maybeEmitEvent(new BeforeConvertEvent<T>(objectToSave, collectionName));
+			T toSave = (T) initializeVersionProperty(objectToSave);
+			maybeEmitEvent(new BeforeConvertEvent<>(toSave, collectionName));
 
-			Document dbDoc = toDbObject(objectToSave, writer);
+			Document dbDoc = toDbObject(toSave, writer);
 
-			maybeEmitEvent(new BeforeSaveEvent<T>(objectToSave, dbDoc, collectionName));
+			maybeEmitEvent(new BeforeSaveEvent<T>(toSave, dbDoc, collectionName));
 
-			Mono<T> afterInsert = insertDBObject(collectionName, dbDoc, objectToSave.getClass()).flatMap(id -> {
-				populateIdIfNecessary(objectToSave, id);
-				maybeEmitEvent(new AfterSaveEvent<T>(objectToSave, dbDoc, collectionName));
-				return Mono.just(objectToSave);
+			Mono<T> afterInsert = insertDBObject(collectionName, dbDoc, toSave.getClass()).map(id -> {
+
+				T saved = (T) populateIdIfNecessary(toSave, id);
+				maybeEmitEvent(new AfterSaveEvent<>(saved, dbDoc, collectionName));
+				return saved;
 			});
 
 			return afterInsert;
@@ -1310,18 +1312,15 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 		Assert.notNull(writer, "MongoWriter must not be null!");
 
 		Mono<List<Tuple2<T, Document>>> prepareDocuments = Flux.fromIterable(batchToSave)
-				.flatMap(new Function<T, Flux<Tuple2<T, Document>>>() {
-					@Override
-					public Flux<Tuple2<T, Document>> apply(T o) {
+				.map(o -> {
 
-						initializeVersionProperty(o);
-						maybeEmitEvent(new BeforeConvertEvent<T>(o, collectionName));
+					T toSave = (T) initializeVersionProperty(o);
+					maybeEmitEvent(new BeforeConvertEvent<T>(toSave, collectionName));
 
-						Document dbDoc = toDbObject(o, writer);
+					Document dbDoc = toDbObject(toSave, writer);
 
-						maybeEmitEvent(new BeforeSaveEvent<T>(o, dbDoc, collectionName));
-						return Flux.zip(Mono.just(o), Mono.just(dbDoc));
-					}
+					maybeEmitEvent(new BeforeSaveEvent<>(toSave, dbDoc, collectionName));
+					return Tuples.of(toSave, dbDoc);
 				}).collectList();
 
 		Flux<Tuple2<T, Document>> insertDocuments = prepareDocuments.flatMapMany(tuples -> {
@@ -1333,9 +1332,9 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 
 		return insertDocuments.map(tuple -> {
 
-			populateIdIfNecessary(tuple.getT1(), tuple.getT2().get(ID_FIELD));
-			maybeEmitEvent(new AfterSaveEvent<T>(tuple.getT1(), tuple.getT2(), collectionName));
-			return tuple.getT1();
+			T saved = (T) populateIdIfNecessary(tuple.getT1(), tuple.getT2().get(ID_FIELD));
+			maybeEmitEvent(new AfterSaveEvent<>(saved, tuple.getT2(), collectionName));
+			return saved;
 		});
 	}
 
@@ -1422,17 +1421,19 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 			// Bump version number
 			convertingAccessor.setProperty(versionProperty, versionNumber.longValue() + 1);
 
-			ReactiveMongoTemplate.this.maybeEmitEvent(new BeforeConvertEvent<T>(objectToSave, collectionName));
+			T toSave = (T) convertingAccessor.getBean();
 
-			Document document = ReactiveMongoTemplate.this.toDbObject(objectToSave, mongoConverter);
+			ReactiveMongoTemplate.this.maybeEmitEvent(new BeforeConvertEvent<T>(toSave, collectionName));
 
-			ReactiveMongoTemplate.this.maybeEmitEvent(new BeforeSaveEvent<T>(objectToSave, document, collectionName));
+			Document document = ReactiveMongoTemplate.this.toDbObject(toSave, mongoConverter);
+
+			ReactiveMongoTemplate.this.maybeEmitEvent(new BeforeSaveEvent<T>(toSave, document, collectionName));
 			Update update = Update.fromDocument(document, ID_FIELD);
 
-			return doUpdate(collectionName, query, update, objectToSave.getClass(), false, false).map(updateResult -> {
+			return doUpdate(collectionName, query, update, toSave.getClass(), false, false).map(updateResult -> {
 
-				maybeEmitEvent(new AfterSaveEvent<T>(objectToSave, document, collectionName));
-				return objectToSave;
+				maybeEmitEvent(new AfterSaveEvent<T>(toSave, document, collectionName));
+				return toSave;
 			});
 		});
 	}
@@ -1449,9 +1450,9 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 
 			return saveDocument(collectionName, dbDoc, objectToSave.getClass()).map(id -> {
 
-				populateIdIfNecessary(objectToSave, id);
-				maybeEmitEvent(new AfterSaveEvent<T>(objectToSave, dbDoc, collectionName));
-				return objectToSave;
+				T saved = (T) populateIdIfNecessary(objectToSave, id);
+				maybeEmitEvent(new AfterSaveEvent<T>(saved, dbDoc, collectionName));
+				return saved;
 			});
 		});
 	}
@@ -2466,10 +2467,10 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 	 * @param id
 	 */
 	@SuppressWarnings("unchecked")
-	private void populateIdIfNecessary(Object savedObject, @Nullable Object id) {
+	private Object populateIdIfNecessary(Object savedObject, @Nullable Object id) {
 
 		if (id == null) {
-			return;
+			return null;
 		}
 
 		if (savedObject instanceof Map) {
@@ -2477,13 +2478,13 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 			Map<String, Object> map = (Map<String, Object>) savedObject;
 			map.put(ID_FIELD, id);
 
-			return;
+			return map;
 		}
 
 		MongoPersistentProperty idProp = getIdPropertyFor(savedObject.getClass());
 
 		if (idProp == null) {
-			return;
+			return savedObject;
 		}
 
 		ConversionService conversionService = mongoConverter.getConversionService();
@@ -2491,10 +2492,12 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 		PersistentPropertyAccessor accessor = entity.getPropertyAccessor(savedObject);
 
 		if (accessor.getProperty(idProp) != null) {
-			return;
+			return accessor.getBean();
 		}
 
 		new ConvertingPropertyAccessor(accessor, conversionService).setProperty(idProp, id);
+
+		return accessor.getBean();
 	}
 
 	private MongoCollection<Document> getAndPrepareCollection(MongoDatabase db, String collectionName) {
@@ -2760,7 +2763,7 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 		}
 	}
 
-	private void initializeVersionProperty(Object entity) {
+	private Object initializeVersionProperty(Object entity) {
 
 		MongoPersistentEntity<?> mongoPersistentEntity = getPersistentEntity(entity.getClass());
 
@@ -2768,7 +2771,11 @@ public class ReactiveMongoTemplate implements ReactiveMongoOperations, Applicati
 			ConvertingPropertyAccessor accessor = new ConvertingPropertyAccessor(
 					mongoPersistentEntity.getPropertyAccessor(entity), mongoConverter.getConversionService());
 			accessor.setProperty(mongoPersistentEntity.getRequiredVersionProperty(), 0);
+
+			return accessor.getBean();
 		}
+
+		return entity;
 	}
 
 	// Callback implementations
