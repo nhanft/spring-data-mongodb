@@ -30,15 +30,28 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
+import lombok.Value;
+import lombok.experimental.Wither;
 
 import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.*;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import lombok.experimental.Wither;
 import org.bson.types.ObjectId;
 import org.hamcrest.collection.IsMapContaining;
 import org.joda.time.DateTime;
@@ -56,8 +69,10 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.annotation.PersistenceConstructor;
 import org.springframework.data.annotation.Version;
+import org.springframework.data.auditing.IsNewAwareAuditingHandler;
 import org.springframework.data.convert.CustomConversions;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -77,6 +92,7 @@ import org.springframework.data.mongodb.core.index.IndexInfo;
 import org.springframework.data.mongodb.core.mapping.Field;
 import org.springframework.data.mongodb.core.mapping.MongoMappingContext;
 import org.springframework.data.mongodb.core.mapping.event.AbstractMongoEventListener;
+import org.springframework.data.mongodb.core.mapping.event.AuditingEventListener;
 import org.springframework.data.mongodb.core.mapping.event.BeforeConvertEvent;
 import org.springframework.data.mongodb.core.mapping.event.BeforeSaveEvent;
 import org.springframework.data.mongodb.core.query.BasicQuery;
@@ -139,6 +155,8 @@ public class MongoTemplateTests {
 		this.context = context;
 
 		context.addApplicationListener(new PersonWithIdPropertyOfTypeUUIDListener());
+		context.addApplicationListener(
+				new AuditingEventListener(() -> new IsNewAwareAuditingHandler(template.getConverter().getMappingContext())));
 	}
 
 	@Autowired
@@ -217,6 +235,7 @@ public class MongoTemplateTests {
 		template.dropCollection(DocumentWithCollectionOfSamples.class);
 		template.dropCollection(WithGeoJson.class);
 		template.dropCollection(DocumentWithNestedTypeHavingStringIdProperty.class);
+		template.dropCollection(ImmutableAudited.class);
 	}
 
 	@Test
@@ -351,7 +370,6 @@ public class MongoTemplateTests {
 	}
 
 	@Test
-	@SuppressWarnings("deprecation")
 	public void testEnsureIndex() throws Exception {
 
 		Person p1 = new Person("Oliver");
@@ -760,7 +778,7 @@ public class MongoTemplateTests {
 		assertThat(template.findDistinct(new BasicQuery("{'address.state' : 'PA'}"), "name", MyPerson.class, String.class))
 				.containsExactlyInAnyOrder(person1.getName(), person2.getName());
 		assertThat(template.findDistinct(new BasicQuery("{'address.state' : 'PA'}"), "name",
-				template.determineCollectionName(MyPerson.class), MyPerson.class, String.class))
+				template.getCollectionName(MyPerson.class), MyPerson.class, String.class))
 						.containsExactlyInAnyOrder(person1.getName(), person2.getName());
 	}
 
@@ -1257,14 +1275,14 @@ public class MongoTemplateTests {
 
 		template.setWriteConcern(WriteConcern.UNACKNOWLEDGED);
 		template.save(person);
-		UpdateResult result = template.updateFirst(query(where("id").is(person.getId())), update("firstName", "Carter"),
+		template.updateFirst(query(where("id").is(person.getId())), update("firstName", "Carter"),
 				PersonWithIdPropertyOfTypeObjectId.class);
 
 		FsyncSafeWriteConcernResolver resolver = new FsyncSafeWriteConcernResolver();
 		template.setWriteConcernResolver(resolver);
 		Query q = query(where("_id").is(person.getId()));
 		Update u = update("firstName", "Carter");
-		result = template.updateFirst(q, u, PersonWithIdPropertyOfTypeObjectId.class);
+		template.updateFirst(q, u, PersonWithIdPropertyOfTypeObjectId.class);
 
 		MongoAction lastMongoAction = resolver.getMongoAction();
 		assertThat(lastMongoAction.getCollectionName(), is("personWithIdPropertyOfTypeObjectId"));
@@ -1281,7 +1299,7 @@ public class MongoTemplateTests {
 
 		public WriteConcern resolve(MongoAction action) {
 			this.mongoAction = action;
-			return WriteConcern.FSYNC_SAFE;
+			return WriteConcern.JOURNALED;
 		}
 
 		public MongoAction getMongoAction() {
@@ -1528,7 +1546,7 @@ public class MongoTemplateTests {
 		org.bson.Document document = new org.bson.Document();
 		document.put("firstName", "Oliver");
 
-		template.insert(document, template.determineCollectionName(PersonWithVersionPropertyOfTypeInteger.class));
+		template.insert(document, template.getCollectionName(PersonWithVersionPropertyOfTypeInteger.class));
 	}
 
 	@Test // DATAMONGO-1617
@@ -1683,7 +1701,7 @@ public class MongoTemplateTests {
 	@Test(expected = DuplicateKeyException.class) // DATAMONGO-622
 	public void preventsDuplicateInsert() {
 
-		template.setWriteConcern(WriteConcern.SAFE);
+		template.setWriteConcern(WriteConcern.ACKNOWLEDGED);
 
 		PersonWithVersionPropertyOfTypeInteger person = new PersonWithVersionPropertyOfTypeInteger();
 		person.firstName = "Dave";
@@ -3329,11 +3347,11 @@ public class MongoTemplateTests {
 		template.save(rickon);
 
 		List<Sample> result = template.findAllAndRemove(query(where("field").regex(".*stark$")),
-				template.determineCollectionName(Sample.class));
+				template.getCollectionName(Sample.class));
 
 		assertThat(result, hasSize(2));
 		assertThat(result, containsInAnyOrder(bran, rickon));
-		assertThat(template.count(new BasicQuery("{}"), template.determineCollectionName(Sample.class)), is(equalTo(1L)));
+		assertThat(template.count(new BasicQuery("{}"), template.getCollectionName(Sample.class)), is(equalTo(1L)));
 	}
 
 	@Test // DATAMONGO-1779
@@ -3389,10 +3407,25 @@ public class MongoTemplateTests {
 
 		template.save(source);
 
-		DocumentWithNestedTypeHavingStringIdProperty target = template.query(DocumentWithNestedTypeHavingStringIdProperty.class)
+		DocumentWithNestedTypeHavingStringIdProperty target = template
+				.query(DocumentWithNestedTypeHavingStringIdProperty.class)
 				.matching(query(where("sample.id").is(source.sample.id))).firstValue();
 
 		assertThat(target).isEqualTo(source);
+	}
+
+	@Test // DATAMONGO-1992
+	public void writesAuditingMetadataForImmutableTypes() {
+
+		ImmutableAudited source = new ImmutableAudited(null, null);
+		ImmutableAudited result = template.save(source);
+
+		assertThat(result).isNotSameAs(source).describedAs("Expected a different instances to be returned!");
+		assertThat(result.modified).isNotNull().describedAs("Auditing field must not be null!");
+
+		ImmutableAudited read = template.findOne(query(where("id").is(result.getId())), ImmutableAudited.class);
+
+		assertThat(read.modified).isEqualTo(result.modified).describedAs("Expected auditing information to be read!");
 	}
 
 	static class TypeWithNumbers {
@@ -3851,6 +3884,8 @@ public class MongoTemplateTests {
 
 	}
 
+	// DATAMONGO-1992
+
 	@AllArgsConstructor
 	@Wither
 	static class ImmutableVersioned {
@@ -3862,5 +3897,12 @@ public class MongoTemplateTests {
 			id = null;
 			version = null;
 		}
+	}
+
+	@Value
+	@Wither
+	static class ImmutableAudited {
+		@Id String id;
+		@LastModifiedDate Instant modified;
 	}
 }

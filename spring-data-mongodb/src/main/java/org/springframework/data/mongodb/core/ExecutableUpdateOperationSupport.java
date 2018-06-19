@@ -151,7 +151,10 @@ class ExecutableUpdateOperationSupport implements ExecutableUpdateOperation {
 		 */
 		@Override
 		public @Nullable T findAndModifyValue() {
-			return template.findAndModify(query, update, options != null ? options : new FindAndModifyOptions(), domainType, getCollectionName());
+
+			return template.findAndModify(query, update, options != null //
+					? options //
+					: new FindAndModifyOptions(), domainType, getCollectionName());
 		}
 
 		private UpdateResult doUpdate(boolean multi, boolean upsert) {
@@ -159,7 +162,7 @@ class ExecutableUpdateOperationSupport implements ExecutableUpdateOperation {
 		}
 
 		private String getCollectionName() {
-			return StringUtils.hasText(collection) ? collection : template.determineCollectionName(domainType);
+			return StringUtils.hasText(collection) ? collection : template.getCollectionName(domainType);
 		}
 	}
 }
